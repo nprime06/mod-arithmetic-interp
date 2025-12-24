@@ -30,7 +30,6 @@ class TrainingConfig:
     lr: float
     weight_decay: float
     epochs: int
-    run_dir: str
 
 model_config = ModelConfig(
     block_size=4,
