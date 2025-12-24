@@ -10,6 +10,7 @@ src/
 ├── data.py
 ├── train.py
 ├── experiment.py
+├── main.py
 
 scripts/
 ├── run.sh
