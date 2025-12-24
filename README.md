@@ -4,7 +4,7 @@ Minimal reproduction of _Progress Measures for Grokking via Mechanistic Interpre
 
 # File structure
 
-code```
+```
 src/
 ├── model.py
 ├── data.py
