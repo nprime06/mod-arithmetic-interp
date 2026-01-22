@@ -13,7 +13,7 @@ class GQA(nn.Module):
         self.wv = nn.Linear(d_model, d_head * h_k, bias=False)
         self.wo = nn.Linear(d_head * h_q, d_model, bias=False)
 
-    def forward(self, x, mask=True):
+    def forward(self, x, use_causal_mask=False):
         B, T, _ = x.shape
         Q = self.wq(x) # (B, T, d_head * h_q)
         K = self.wk(x) # (B, T, d_head * h_k)
@@ -28,11 +28,12 @@ class GQA(nn.Module):
         V = V.unsqueeze(1)
 
         attn = (Q @ K.transpose(-2, -1)) * (self.d_head ** -0.5)  # (B, h_q/h_k, h_k, T, T)
-        if mask:
-            causal_mask = torch.triu(torch.ones(T, T), diagonal=1).bool()
+        if use_causal_mask:
+            causal_mask = torch.triu(torch.ones(T, T, device=x.device), diagonal=1).bool()
             attn = attn.masked_fill(causal_mask, float('-inf'))
 
         attn = F.softmax(attn, dim=-1)  # (B, h_q/h_k, h_k, T, T)
+        self.attn_pattern = attn  # Store for analysis
         out = attn @ V  # (B, h_q/h_k, h_k, T, d_head)
         out = out.reshape(B, self.h_q, T, self.d_head).permute(0, 2, 1, 3).reshape(B, T, -1)
         out = self.wo(out) # (B, T, d_model)
@@ -46,16 +47,25 @@ class Transformer(nn.Module): # (B, T, d_model) -> (B, T, d_model)
         self.h_q = h_q
         self.h_k = h_k
 
-        self.gqa = GQA(d_head, d_model, h_q, h_k) 
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_model * 4),
-            nn.ReLU(),
-            nn.Linear(d_model * 4, d_model),
-        )
-        
+        self.gqa = GQA(d_head, d_model, h_q, h_k)
+        # Split FFN into components for interpretability
+        self.ffn_in = nn.Linear(d_model, d_model * 4, bias=False)
+        self.ffn_act = nn.ReLU()
+        self.ffn_out = nn.Linear(d_model * 4, d_model, bias=False)
+
+        # Storage for activations (for mechanistic interpretability)
+        self.mlp_pre = None   # Pre-ReLU activations
+        self.mlp_post = None  # Post-ReLU activations
+
     def forward(self, x):
-        x = self.gqa(x)
-        x = self.ffn(x)
+        x = x + self.gqa(x)  # Residual connection for attention
+
+        # FFN with activation storage
+        self.mlp_pre = self.ffn_in(x)      # Store pre-ReLU
+        self.mlp_post = self.ffn_act(self.mlp_pre)  # Store post-ReLU
+        ffn_out = self.ffn_out(self.mlp_post)
+
+        x = x + ffn_out  # Residual connection for FFN
         return x
 
 class ModAddModel(nn.Module):
@@ -76,15 +86,19 @@ class ModAddModel(nn.Module):
             h = nn.ModuleList([Transformer(config.d_model, config.d_head, config.h_q, config.h_k) for _ in range(config.n_layer)]),
         ))
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
-        
-    def forward(self, idx):
+
+    def forward(self, idx, use_pos_embed=False):
         B, T = idx.shape
+        device = idx.device
         assert T <= self.config.block_size, f"Block size is {self.config.block_size}"
 
-        pos = torch.arange(0, T)
-        tok_emb = self.model.wte(idx) # (B, T, d_model)
-        pos_emb = self.model.wpe(pos).unsqueeze(0) # (1, T, d_model)
-        x = tok_emb + pos_emb # (B, T, d_model)
+        tok_emb = self.model.wte(idx)  # (B, T, d_model)
+        if use_pos_embed:
+            pos = torch.arange(0, T, device=device)
+            pos_emb = self.model.wpe(pos).unsqueeze(0)  # (1, T, d_model)
+            x = tok_emb + pos_emb
+        else:
+            x = tok_emb  # No positional embedding (matches Nanda's setup)
 
         for block in self.model.h:
             x = block(x)

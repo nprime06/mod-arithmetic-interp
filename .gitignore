@@ -157,3 +157,5 @@ Thumbs.db
 
 modvenv/
 scripts/
+
+logs/
